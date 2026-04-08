@@ -1,4 +1,4 @@
-# Final--Project-yzhan949-xlin097
+# Concurrent Graph Analytics Engine
 
 # Phase 1: Concurrent Local Queries
 
