@@ -1,2 +1,2 @@
-g++ -std=c++17 ./code/main.cpp -o main
-./main
+g++ -std=c++17 ./code/main.cpp -o main.o
+./main.o
