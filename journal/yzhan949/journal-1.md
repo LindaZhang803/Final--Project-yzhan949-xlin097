@@ -25,7 +25,7 @@ void RunTasksSequential(const CSRGraph& g, std::vector<QueryTask>& tasks) {
         task.result = task.cb(g, task.src, task.K);
     }
 }
-
+```
 After that, I implemented the parallel version. The main challenge was dividing the task list safely across multiple threads. I needed to make sure that threads would not overwrite each other’s results. To solve this, I used a worker function that processes only a fixed range of tasks:
 
 ```cpp
@@ -34,7 +34,7 @@ void Worker(const CSRGraph& g, std::vector<QueryTask>& tasks, int start, int end
         tasks[i].result = tasks[i].cb(g, tasks[i].src, tasks[i].K);
     }
 }
-
+```
 Then, in RunTasksParallel, I split the tasks into chunks and assigned each chunk to one thread. I also handled invalid input and edge cases, such as num_threads <= 0 and an empty task list.
 
 ```cpp
@@ -69,12 +69,12 @@ void RunTasksParallel(const CSRGraph& g, std::vector<QueryTask>& tasks, int num_
         th.join();
     }
 }
-
+```
 One difficulty during this process was making sure that the number of threads did not exceed the number of tasks. If too many threads are created, some threads would do no useful work. I addressed this by using:
 
 ```cpp
 int actual_threads = std::min(num_threads, n);
-
+```
 Another issue was correctness checking. Since parallel execution may appear to run successfully even when results are wrong, I implemented CheckResultsEqual to compare outputs from sequential and parallel executions.
 
 ```cpp
@@ -91,7 +91,7 @@ bool CheckResultsEqual(const std::vector<QueryTask>& a, const std::vector<QueryT
 
     return true;
 }
-
+```
 This gave me a simple way to validate that the parallel engine produced the same results as the sequential baseline.
 
 
