@@ -10,8 +10,8 @@
 int main(int argc, char* argv[]) {
     try {
         // defaults
-        std::string graph_file = "soc-Slashdot0902.txt";
-        std::string query_file = "queries10000.txt";
+        std::string graph_file = "file/soc-Slashdot0902.txt";
+        std::string query_file = "file/queries10000.txt";
 
         if (argc >= 2) {
             graph_file = argv[1];
