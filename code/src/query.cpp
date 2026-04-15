@@ -1,4 +1,4 @@
-#include "query.h"
+#include "../head/query.h"
 
 #include <fstream>
 #include <sstream>

@@ -14,12 +14,6 @@ void Worker(const CSRGraph& g, std::vector<QueryTask>& tasks, int start, int end
 
 }  // namespace
 
-void RunTasksSequential(const CSRGraph& g, std::vector<QueryTask>& tasks) {
-    for (auto& task : tasks) {
-        task.result = task.cb(g, task.src, task.K);//调用查询回调函数并存储结果
-    }
-}
-
 void RunTasksParallel(const CSRGraph& g, std::vector<QueryTask>& tasks, int num_threads) {
     if (num_threads <= 0) {
         throw std::invalid_argument("num_threads must be > 0");//检查线程数是否合法
