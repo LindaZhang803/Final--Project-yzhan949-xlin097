@@ -4,6 +4,12 @@
 #include <sstream>
 #include <stdexcept>
 
+struct WeightedEdge {
+    int src;
+    int dst;
+    int weight;
+};
+
 CSRGraph LoadGraph(const std::string& filename) {
     CSRGraph g;
 
