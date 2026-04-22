@@ -1,5 +1,3 @@
-# Development Journal - Phase 2a
-
 ## Name / NetID
 Linda Zhang / yzhang949
 
