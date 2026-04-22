@@ -1,215 +1,167 @@
-# Phase 2a: Parallel Global Queries
+# Phase 2b: Push-based Graph Algorithms
 
 ## Introduction
 
-In this phase, you will implement three classical graph algorithms (BFS, SSSP, and CC) using the Bulk Synchronous Parallel (BSP) execution model.
+Phase 2a implemented BFS, SSSP, and CC in **pull style**: each round, every vertex `v` scanned its in-edges and took the best improvement from any in-neighbor. Pull has a convenient property: the thread that owns `v` is the only writer of `state[v]`, so different threads never collide on the same destination.
 
-BSP divides the computation into rounds. In each round:
-1. **Process** every vertex (in parallel when multiple threads are used).
-2. **Synchronize**: wait for all threads to finish the round.
-3. **Finalize** (single-threaded): combine per-thread results and set up state for the next round.
+In this phase you will re-implement the same three algorithms in **push style** on the same BSP framework. In push, each active vertex `u` walks its **out-edges** and **writes to** each out-neighbor `v`:
 
-Repeat until a full round produces no updates.
+- **BFS**: set `dist[v] = dist[u] + 1` if `v` is not yet discovered.
+- **SSSP**: set `dist[v] = min(dist[v], dist[u] + weight(u, v))`.
+- **CC**: set `comp[v] = min(comp[v], comp[u])` (undirected: iterate both in- and out-neighbors).
 
-You will implement a small BSP framework (a serial runner and a parallel runner built on `std::thread`) and plug in three algorithm callbacks. The framework should be designed so that each algorithm is written once and can be executed by either runner unchanged.
+Push has an advantage over pull: you only visit edges that matter, i.e., the edges leaving vertices whose state changed last round. But it also introduces a new problem: two different source vertices handled by two different threads can push to the **same** destination `v` at the same time. You must coordinate those writes.
 
 ## Requirements
 
-1. **Graph Loading**: Extend the CSR representation from Phase 1 to carry:
-   - Edge weights
-   - A reverse CSR (in-edges) alongside the forward CSR
+Graph loading, file formats, and the `CsrGraph` / `BspAlgorithm` interfaces from Phase 2a carry over unchanged.
 
-2. **BSP Framework**: Design a small framework that separates *what an algorithm does per vertex* from *how vertices are scheduled in a round*. Your framework should include:
-   - An interface (e.g., an abstract base class) that an algorithm plugs into by providing a per-vertex callback, end-of-round bookkeeping, and a way to tell the runner when to stop.
-   - A serial runner.
-   - A parallel runner built on `std::thread`.
+Implement each of **BFS**, **SSSP**, and **CC** four times. Don't be alarmed by the count: the four versions share most of their code, so after you write (1) the other three are mostly small deltas (add a worklist; add locks; add both).
 
-   Design the interface so that the **same algorithm implementation** runs unchanged under either runner.
+1. **Serial lock-free, naive push.** Push-based, single-threaded, no worklist, no locks. Every round, every vertex with a known state pushes to its out-neighbors. This is your simplest reference implementation.
 
-3. **Algorithms**: Implement the following three algorithms as callbacks to your framework. Write each algorithm **once**; the same code should run under both runners.
-   - **BFS**: shortest hop-distance from a source vertex.
-   - **SSSP**: shortest weighted distance from a source vertex (Bellman-Ford style relaxation).
-   - **CC**: weakly connected components via label propagation. Treat edges as undirected when propagating labels (each vertex adopts the minimum label among all its neighbors, in either direction).
+2. **Serial lock-free, dense worklist.** Adds a dense bitmap frontier (e.g., `std::vector<uint8_t>`) to (1). Each round only processes vertices whose state changed in the previous round. Still single-threaded, still no locks.
 
-4. **Correctness**: For each algorithm, the serial and parallel runs must produce identical per-vertex results.
+3. **Parallel naive push.** The same algorithm as (1), run under the Phase 2a parallel runner. Because multiple threads can write to the same `v`, this version must use locks to prevent data races.
 
-5. **Performance Comparison**: Measure and compare execution times for the serial and parallel versions, and report speedup in the development journal.
+4. **Parallel push with a dense worklist.** The same algorithm as (2), run under the parallel runner. Still uses locks.
+
+**Correctness.** All four versions of each algorithm must produce identical per-vertex results, and identical to the Phase 2a answer files (`BFS.txt`, `SSSP.txt`, `CC.txt`).
+
+**Performance.** Measure and compare execution time for all four versions. Report in your development journal (see Experiments below).
 
 ## Hints
 
-### Weighted Edge List Format
+### Why push races, and pull does not
 
-The input graph is a tab-separated text file with three columns:
+In pull, `Process(tid, v, g)` reads from in-neighbors and writes `state[v]`. The parallel runner assigns each `v` to exactly one thread, so `state[v]` has a single writer per round.
 
-```
-src	dst	weight
-```
+In push, `Process(tid, u, g)` reads from `u` and writes `state[v]` for each out-neighbor `v`. The runner still partitions by the *argument* to `Process`, but now that argument is the **source** `u`, not the destination. Nothing prevents two sources (handled by two different threads) from pointing at the same `v`. Without synchronization, the concurrent writes race: updates can be lost, and the read-then-compare-then-write sequence can interleave incorrectly.
 
-Lines starting with `#` are comments. Example:
+### Protecting writes with a striped lock pool
 
-```
-# FromNodeId	ToNodeId	Weight
-0	1	194
-0	2	221
-1	3	76
-2	3	175
-```
+You need a mutex associated with the destination `v`. One mutex per vertex is cleanest but wasteful: `sizeof(std::mutex)` is tens of bytes, so millions of vertices would use hundreds of megabytes just for locks.
 
-### Answer File Format
+A **striped lock pool** is a better fit: allocate a fixed pool of `K` mutexes (e.g., `K = 1024`) and map `v` to `locks[v % K]`. Memory stays constant in `K`, at the cost that two unrelated destinations occasionally share a mutex. Pick `K` as a power of two so `v % K` can be replaced with `v & (K - 1)`.
 
-Each algorithm writes one line per vertex, sorted by vertex ID. The two columns are separated by a space.
+### Algorithm design (naive push)
 
-- **BFS**: `vertex_id hop_distance`. Hop distance from the source, or `-1` if unreachable.
-- **SSSP**: `vertex_id weighted_distance`. Shortest weighted distance from the source, or `-1` if unreachable.
-- **CC**: `vertex_id component_id`. The component ID is the smallest vertex ID in the weakly connected component containing `vertex_id`.
+As in Phase 2a, keep two arrays (`state_` and `state_prev_`) so reads of a neighbor's state don't race with writes. `PostRound()` copies `state_` into `state_prev_` at the end of each round so the next round starts from a stable snapshot.
 
-### Data Structures & Interfaces
-
-The following definitions are provided as a starting point. Feel free to adapt or redesign them to better suit your implementation.
-
-```cpp
-struct CsrGraph {
-    uint32_t num_vertices;
-    std::vector<uint32_t> offsets;      // out-edges, size = num_vertices + 1
-    std::vector<uint32_t> edges;        // out-neighbor IDs
-    std::vector<int> weights;           // edge weights (parallel to edges)
-    std::vector<uint32_t> in_offsets;   // in-edges (reverse CSR)
-    std::vector<uint32_t> in_edges;     // in-neighbor IDs
-    std::vector<int> in_weights;        // reverse edge weights (parallel to in_edges)
-};
-
-class BspAlgorithm {
-public:
-    virtual ~BspAlgorithm() = default;
-
-    // Returns true if another round should be run.
-    virtual bool HasWork() const = 0;
-
-    // Process one vertex. tid ∈ [0, nthreads). The serial runner calls with
-    // tid=0; the parallel runner calls with each thread's ID.
-    virtual void Process(int tid, uint32_t v, const CsrGraph& g) = 0;
-
-    // End of round. Merge per-thread buffers, prepare state for next round.
-    virtual void PostRound() = 0;
-};
-
-void BspSerial(const CsrGraph& g, BspAlgorithm& algo);
-void BspParallel(const CsrGraph& g, BspAlgorithm& algo, int nthreads);
-```
-
-Each of BFS, SSSP, and CC is implemented as a subclass of `BspAlgorithm` (e.g., `class Bfs : public BspAlgorithm`), then passed into a runner:
-
-```cpp
-Bfs bfs(g.num_vertices, /*source=*/0, /*nthreads=*/1);
-BspSerial(g, bfs);
-
-Bfs bfs_p(g.num_vertices, /*source=*/0, /*nthreads=*/4);
-BspParallel(g, bfs_p, /*nthreads=*/4);
-```
-
-A minimal `BspSerial` is just a loop over the three virtual methods:
-
-```cpp
-void BspSerial(const CsrGraph& g, BspAlgorithm& algo) {
-  while (algo.HasWork()) {
-    for (uint32_t v = 0; v < g.num_vertices; v++) {
-      algo.Process(/*tid=*/0, v, g);
-    }
-    algo.PostRound();
-  }
-}
-```
-
-`BspParallel` has the same outer structure. The only change is inside the round: instead of one thread iterating every vertex, partition `[0, num_vertices)` into `nthreads` contiguous ranges, spawn an `std::thread` per range (each calling `Process()` with its own `tid`), and wait for all threads to finish before calling `PostRound()`.
-
-### Algorithm Design
-
-Since the same algorithm must run under both runners, design `Process(tid, v, g)` so it only **reads** neighbor state and only **writes** `v`'s own state. The parallel runner assigns each vertex to exactly one thread (static partitioning of `[0, num_vertices)`), so `v`'s state is written by one thread per round.
-
-Every round, every vertex `v` scans its in-edges (via the reverse CSR) and takes the best improvement, if any, from any in-neighbor. The algorithm is **done** when a full round produces no updates.
+Pseudocode for one round of naive push (requirement 2):
 
 ```
-Process(tid, v, g):
-    best = current state of v
-    updated = false
-    for u in in_neighbors(v):
-        candidate = value derived from state_prev[u]
+Process(tid, u, g):
+    if u has no known state: return
+    for v in out_neighbors(u):
+        candidate = derived from state_prev[u]
                     //   BFS:  state_prev[u] + 1
                     //   SSSP: state_prev[u] + weight(u, v)
                     //   CC:   state_prev[u]
-        if candidate improves best:
-            best = candidate
-            updated = true
-    if updated:
-        state of v = best
-        tl_updated[tid] = 1
+        lock(locks[v & (K - 1)])
+        if candidate improves state[v]:
+            state[v] = candidate
+            tl_updated[tid] = 1
+        unlock(locks[v & (K - 1)])
 ```
 
-**Signaling convergence.** Each thread sets `tl_updated[tid] = 1` when it updates at least one vertex during the round. `PostRound()` reduces the per-thread flags into a single `any_updated` boolean; `HasWork()` returns that value, so the loop exits as soon as a round settles everything.
+Termination works the same as Phase 2a: each thread sets `tl_updated[tid]` when it writes something, `PostRound()` reduces the flags, `HasWork()` returns the reduced bit.
 
-**Double buffering.** A vertex's value can be improved more than once (SSSP finds shorter paths, CC finds smaller labels). If thread A reads `state[u]` while thread B is simultaneously writing `state[u]`, the read is unsafe. To prevent this, keep two arrays: `state_` (live, written by `Process()`) and `state_prev_` (read by `Process()`, a snapshot of the values at the end of the previous round). `PostRound()` copies `state_` into `state_prev_` so the next round reads a stable view.
+### Dense-worklist push (requirement 3)
 
-> **Note on CC**: CC computes weakly connected components, so labels should propagate across every edge regardless of direction. For CC, `Process()` must scan both in-neighbors and out-neighbors.
+The worklist is represented as a dense byte bitmap (e.g., `std::vector<uint8_t>`). You need two of them:
 
-### Overall Workflow
-
-The following pseudocode illustrates the overall workflow. It is provided as a reference, and you may organize your code differently.
+- `in_frontier[v]`: is `v` in the current round's frontier?
+- `in_next[v]`: will `v` be in the next round's frontier?
 
 ```
-// 1. Load weighted graph with reverse edges
+Process(tid, u, g):
+    if !in_frontier[u]: return
+    for v in out_neighbors(u):
+        candidate = derived from state_prev[u]
+        lock(locks[v & (K - 1)])
+        if candidate improves state[v]:
+            state[v] = candidate
+            in_next[v] = 1
+            tl_updated[tid] = 1
+        unlock(locks[v & (K - 1)])
+
+PostRound():
+    reduce tl_updated flags as in Phase 2a
+    state_prev = state
+    swap(in_frontier, in_next)
+    fill(in_next, 0)
+```
+
+**Initial frontier.**
+
+- **BFS, SSSP**: the frontier starts with only the source vertex.
+- **CC**: the frontier starts with **every** vertex. Every label is "new" in round 0 because the graph has just been initialized with `comp[i] = i`. The frontier will shrink on its own in subsequent rounds.
+
+> **Note on CC.** CC propagates labels across edges in both directions, so push must walk both out-neighbors and in-neighbors of each active `u`.
+
+### Overall workflow
+
+```
 graph = LoadGraph("edge.txt")
 
-// 2. Run BFS with both runners. The same Bfs class is used by both.
-bfs_s = Bfs(graph.num_vertices, source=0, nthreads=1)
-BspSerial(graph, bfs_s)
+// 1. Serial lock-free, naive push
+bfs_sn = BfsPushNaiveSerial(graph.num_vertices, source=0)
+BspSerial(graph, bfs_sn)
 
-bfs_p = Bfs(graph.num_vertices, source=0, nthreads=4)
-BspParallel(graph, bfs_p, nthreads=4)
+// 2. Serial lock-free, dense worklist
+bfs_sd = BfsPushDenseSerial(graph.num_vertices, source=0)
+BspSerial(graph, bfs_sd)
 
-// 3. Verify that serial and parallel produced identical results
-assert bfs_s.distances == bfs_p.distances
+// 3. Parallel naive push (locks, no worklist)
+bfs_pn = BfsPushNaive(graph.num_vertices, source=0, nthreads=4)
+BspParallel(graph, bfs_pn, nthreads=4)
 
-// 4. Repeat for SSSP (source=0) and CC
-// 5. Measure times, report speedup, write BFS.txt / SSSP.txt / CC.txt
+// 4. Parallel push with dense worklist
+bfs_pd = BfsPushDense(graph.num_vertices, source=0, nthreads=4)
+BspParallel(graph, bfs_pd, nthreads=4)
+
+assert bfs_sn.distances == bfs_sd.distances == bfs_pn.distances == bfs_pd.distances
+
+// Repeat for SSSP and CC. Measure times, write answer files.
 ```
 
 ## Testing & Verification
 
-1. **Small test cases**: Build small graphs (5–10 vertices) where you can manually compute expected BFS distances, SSSP shortest paths, and CC labels. Include:
-   - Disconnected components (for CC)
-   - Cycles (to test convergence)
-   - Varying edge weights (to distinguish SSSP from BFS)
-
-2. **Serial-parallel consistency**: Verify that serial and parallel produce identical per-vertex results for all three algorithms.
-
-3. **Provided dataset**: Download `soc-LiveJournal1-weighted.txt` from the [shared folder](https://drive.google.com/drive/folders/1MR0FuR0UxRCIFYBpEQ9e4Bx8s4qA_U7F?usp=sharing). This is a directed social network graph:
-   - 4,847,571 vertices, 68,993,773 edges
-   - Tab-separated, with integer edge weights in [1, 400]
-   - Use `head -n 5 <file-name>` to have a quick look at the format of the provided dataset.
-   - Add it (and the answer files) to `.gitignore` so it is not committed to GitHub.
-
-4. **Answer files**: The shared folder also contains expected answer files (`BFS.txt`, `SSSP.txt`, `CC.txt`) for the provided dataset. Compare your output against these files to verify correctness. BFS and SSSP use source vertex 0.
+**Dataset and file formats** are the same as Phase 2a ([soc-LiveJournal1-weighted.txt](https://drive.google.com/drive/folders/1MR0FuR0UxRCIFYBpEQ9e4Bx8s4qA_U7F?usp=sharing)).
 
 ## Experiments
 
-Run the following experiments on `soc-LiveJournal1-weighted.txt` and report in your development journal. Use source vertex 0 for BFS and SSSP.
+Run on `soc-LiveJournal1-weighted.txt` with source vertex 0 for BFS and SSSP, and report in your development journal.
 
-1. **Serial execution time** for BFS, SSSP, and CC.
+1. **Serial lock-free execution time** for BFS, SSSP, and CC. Report both the naive-push and dense-worklist variants.
 
-2. **Speedup table**: For each algorithm, report:
+2. **Speedup table** for each algorithm. Use the **serial lock-free naive push** time as the baseline (1×). Every other cell is the speedup factor `baseline_time / this_time`. Example: if BFS serial lock-free naive takes 500 ms and the 4-thread dense parallel takes 200 ms, its cell is `500 / 200 = 2.5×`; if it took 800 ms instead, the cell would be `500 / 800 = 0.63×` (slower than baseline). The **Pull** columns refer to your Phase 2a implementation: re-run it on the same dataset.
 
-   | Algorithm | Serial | 1 thread | 2 threads | 4 threads | 8 threads |
-   |---|---|---|---|---|---|
-   | BFS | | | | | |
-   | SSSP | | | | | |
-   | CC | | | | | |
+   | Algorithm | Serial LF, naive | Serial LF, dense | Naive parallel / 1t | Naive parallel / 4t | Dense parallel / 1t | Dense parallel / 4t | Pull / 1t | Pull / 4t |
+   |---|---|---|---|---|---|---|---|---|
+   | BFS | 1× | | | | | | | |
+   | SSSP | 1× | | | | | | | |
+   | CC | 1× | | | | | | | |
 
 ### Discussion
 
-Answer the following questions in your development journal:
+Answer the following in your development journal:
 
-1. Inside `Process(tid, v, g)`, which memory location does the function write to? Using the parallel runner's vertex partitioning, explain why two threads can never write to the same location in one round.
+1. Compare (a) the serial lock-free naive push against (b) the 1-thread naive parallel push. They run the same algorithm on a single thread, but (b) also acquires and releases a lock for every push. Are the two times the same? If not, where does the difference come from?
 
-2. Compare the parallel speedup you measured for BFS, SSSP, and CC. Which algorithm scales best, and what property of the algorithm explains the difference?
+2. Compare (a) the serial lock-free naive push against (b) the serial lock-free dense worklist. Neither takes a lock, so any time difference is purely algorithmic. For BFS specifically, explain why (b) visits strictly fewer edges than (a). Does the same saving apply to SSSP and CC?
 
-3. In BFS, `dist_[v]` stores the current shortest hop distance from the source. BFS has two useful properties: (i) once `dist_[v]` is set, later rounds can never change it; (ii) in each round, v's newly-discovered in-neighbors all have the same distance. How could you use these facts to skip work? Why would the same tricks not work for SSSP or CC? (Implementing these optimizations is not required, but strongly encouraged: you should observe a significant speedup over the baseline BFS.)
+3. Compare your **parallel** versions (3, 4) against the **serial lock-free** versions (1, 2). For SSSP and CC, 4 threads with locks may be **slower** than 1 thread without locks; this is expected. Share your own analysis of the numbers you measured: which scaling patterns match your intuition, which surprise you, and what do you think is going on inside the parallel version? (Phase 2c will revisit these with different synchronization techniques.)
+
+4. A **hub** is a vertex with unusually high in-degree, so many other vertices point at it. First verify that hubs exist in `soc-LiveJournal1-weighted.txt`: report the **top-3 in-degrees**. Then answer: when a hub appears as a destination, many threads push to it in the same round and serialize on the hub's lock. Does this problem go away if you enlarge the striped pool? Does it go away if you give every vertex its own mutex? Explain why hub contention is inherent to push-based parallelism.
+
+5. Run the **Dense parallel** version with three different lock-pool sizes: `K = 1024`, `K = 16384`, and `K = 262144`. Fill in:
+
+   | Algorithm | K = 1024 | K = 16384 | K = 262144 |
+   |---|---|---|---|
+   | BFS  | | | |
+   | SSSP | | | |
+   | CC   | | | |
+
+   For each algorithm, which pool size is fastest? Why is "more locks" not always better?
