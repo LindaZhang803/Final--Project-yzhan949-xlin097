@@ -11,12 +11,10 @@ struct WeightedEdge {
 };
 
 CSRGraph LoadGraph(const std::string& filename) {
-    CSRGraph g;
-
     std::ifstream file(filename);
     std::string line;
 
-    std::vector<std::pair<int, int>> edge_list;
+    std::vector<WeightedEdge> edge_list;
     int max_id = -1;
 
     while (getline(file, line)) {
@@ -25,10 +23,17 @@ CSRGraph LoadGraph(const std::string& filename) {
         }
 
         std::stringstream ss(line);
-        int src, dst;
-        ss >> src >> dst;
+        int src = -1;
+        int dst = -1;
+        int weight = 1;
+        if (!(ss >> src >> dst)) {
+            continue;
+        }
+        if (!(ss >> weight)) {
+            weight = 1;
+        }
 
-        edge_list.push_back({src, dst});
+        edge_list.push_back({src, dst, weight});
 
         if (src > max_id) {
             max_id = src;
@@ -38,31 +43,50 @@ CSRGraph LoadGraph(const std::string& filename) {
         }
     }
 
+    CSRGraph g;
     g.num_vertices = max_id + 1;
 
-    std::vector<std::vector<int>> adj(g.num_vertices);
+    if (g.num_vertices <= 0) {
+        g.num_vertices = 0;
+        g.offsets.assign(1, 0);
+        g.in_offsets.assign(1, 0);
+        return g;
+    }
 
-    for (auto &e : edge_list) {
-        int src = e.first;
-        int dst = e.second;
-        adj[src].push_back(dst);
+    std::vector<int> out_degree(g.num_vertices, 0);
+    std::vector<int> in_degree(g.num_vertices, 0);
+
+    for (const auto& e : edge_list) {
+        out_degree[e.src]++;
+        in_degree[e.dst]++;
     }
 
     g.offsets.resize(g.num_vertices + 1);
+    g.in_offsets.resize(g.num_vertices + 1);
     g.offsets[0] = 0;
+    g.in_offsets[0] = 0;
 
     for (int i = 0; i < g.num_vertices; i++) {
-        g.offsets[i + 1] = g.offsets[i] + adj[i].size();
+        g.offsets[i + 1] = g.offsets[i] + out_degree[i];
+        g.in_offsets[i + 1] = g.in_offsets[i] + in_degree[i];
     }
 
-    g.edges.resize(g.offsets[g.num_vertices]);
+    g.edges.assign(g.offsets[g.num_vertices], 0);
+    g.weights.assign(g.offsets[g.num_vertices], 0);
+    g.in_edges.assign(g.in_offsets[g.num_vertices], 0);
+    g.in_weights.assign(g.in_offsets[g.num_vertices], 0);
 
-    int idx = 0;
-    for (int i = 0; i < g.num_vertices; i++) {
-        for (int v : adj[i]) {
-            g.edges[idx] = v;
-            idx++;
-        }
+    std::vector<int> out_cursor = g.offsets;
+    std::vector<int> in_cursor = g.in_offsets;
+
+    for (const auto& e : edge_list) {
+        int out_idx = out_cursor[e.src]++;
+        g.edges[out_idx] = e.dst;
+        g.weights[out_idx] = e.weight;
+
+        int in_idx = in_cursor[e.dst]++;
+        g.in_edges[in_idx] = e.src;
+        g.in_weights[in_idx] = e.weight;
     }
 
     return g;
