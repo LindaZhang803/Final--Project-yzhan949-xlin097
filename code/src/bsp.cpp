@@ -21,6 +21,10 @@ static void BspWorker(const CSRGraph& g, BspAlgorithm& algo, int tid, int start,
 }
 
 void BspParallel(const CSRGraph& g, BspAlgorithm& algo, int num_threads) {
+    if (num_threads <= 0) {
+        throw std::invalid_argument("num_threads must be > 0");
+    }
+
     if (g.num_vertices == 0) {
         return;
     }
